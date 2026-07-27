@@ -1,14 +1,17 @@
-name: Daily SFTP Upload
+name: Daily Palworld Backup
 
 on:
   schedule:
-    # Every day at 16:00 UTC
+    # 9AM Singapore (1AM UTC)
     - cron: '0 16 * * *'
 
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  upload:
+  backup:
     runs-on: ubuntu-latest
 
     steps:
@@ -18,15 +21,19 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt
 
-      - name: Run upload
+      - run: python backup.py
         env:
           SFTP_HOST: ${{ secrets.SFTP_HOST }}
           SFTP_PORT: ${{ secrets.SFTP_PORT }}
           SFTP_USERNAME: ${{ secrets.SFTP_USERNAME }}
           SFTP_PASSWORD: ${{ secrets.SFTP_PASSWORD }}
-          REMOTE_FILE: ${{ secrets.REMOTE_FILE }}
+
+          REMOTE_FOLDER: ${{ secrets.REMOTE_FOLDER }}
+
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: python upload.py
+
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
+          GITHUB_REPOSITORY: ${{ github.repository }}
