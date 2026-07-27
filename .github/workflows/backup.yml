@@ -34,6 +34,6 @@ jobs:
 
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
 
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
 
           GITHUB_REPOSITORY: ${{ github.repository }}
