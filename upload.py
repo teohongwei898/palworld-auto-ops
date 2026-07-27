@@ -7,82 +7,130 @@ from datetime import datetime
 import paramiko
 import requests
 
-# ==========================
-# Environment Variables
-# ==========================
 HOST = os.environ["SFTP_HOST"]
-PORT = int(os.environ.get("SFTP_PORT", 22))
-USERNAME = os.environ["SFTP_USERNAME"]
-PASSWORD = os.environ["SFTP_PASSWORD"]
+PORT = int(os.environ["SFTP_PORT"])
+USER = os.environ["SFTP_USERNAME"]
+PASS = os.environ["SFTP_PASSWORD"]
 
-REMOTE_FOLDER = os.environ["REMOTE_FOLDER"]
+REMOTE = os.environ["REMOTE_FOLDER"]
+
 WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 
+TOKEN = os.environ["GH_TOKEN"]
 
-def download_directory(sftp, remote_dir, local_dir):
-    os.makedirs(local_dir, exist_ok=True)
+REPO = os.environ["GITHUB_REPOSITORY"]
 
-    for item in sftp.listdir_attr(remote_dir):
-        remote_path = remote_dir + "/" + item.filename
-        local_path = os.path.join(local_dir, item.filename)
+headers = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Accept": "application/vnd.github+json"
+}
 
-        if stat.S_ISDIR(item.st_mode):
-            download_directory(sftp, remote_path, local_path)
+
+def download(sftp, remote, local):
+    os.makedirs(local, exist_ok=True)
+
+    for f in sftp.listdir_attr(remote):
+
+        rp = remote + "/" + f.filename
+        lp = os.path.join(local, f.filename)
+
+        if stat.S_ISDIR(f.st_mode):
+            download(sftp, rp, lp)
         else:
-            print(f"Downloading {remote_path}")
-            sftp.get(remote_path, local_path)
+            sftp.get(rp, lp)
 
 
-def main():
-    temp_dir = tempfile.mkdtemp()
+tmp = tempfile.mkdtemp()
 
-    try:
-        transport = paramiko.Transport((HOST, PORT))
-        transport.connect(username=USERNAME, password=PASSWORD)
+transport = paramiko.Transport((HOST, PORT))
+transport.connect(username=USER, password=PASS)
 
-        sftp = paramiko.SFTPClient.from_transport(transport)
+sftp = paramiko.SFTPClient.from_transport(transport)
 
-        local_save = os.path.join(temp_dir, "SaveGames")
+download(sftp, REMOTE, tmp + "/Save")
 
-        print("Downloading save folder...")
-        download_directory(sftp, REMOTE_FOLDER, local_save)
+sftp.close()
+transport.close()
 
-        sftp.close()
-        transport.close()
+today = datetime.utcnow().strftime("%Y-%m-%d")
 
-        date = datetime.now().strftime("%Y-%m-%d")
+zipname = f"Palworld_Backup_{today}"
 
-        archive = shutil.make_archive(
-            f"Palworld_Backup_{date}",
-            "zip",
-            root_dir=temp_dir,
-            base_dir="SaveGames",
+zipfile = shutil.make_archive(
+    zipname,
+    "zip",
+    tmp,
+    "Save"
+)
+
+tag = today
+
+release = requests.post(
+    f"https://api.github.com/repos/{REPO}/releases",
+    headers=headers,
+    json={
+        "tag_name": tag,
+        "name": tag,
+        "generate_release_notes": False
+    }
+)
+
+if release.status_code == 422:
+
+    release = requests.get(
+        f"https://api.github.com/repos/{REPO}/releases/tags/{tag}",
+        headers=headers
+    )
+
+release = release.json()
+
+upload_url = release["upload_url"].split("{")[0]
+
+with open(zipfile, "rb") as f:
+
+    requests.post(
+        upload_url,
+        headers={
+            "Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/zip"
+        },
+        params={
+            "name": os.path.basename(zipfile)
+        },
+        data=f
+    )
+
+release_url = release["html_url"]
+
+requests.post(
+    WEBHOOK,
+    json={
+        "content":
+        f"✅ **Daily Palworld Backup Complete**\n\n"
+        f"📅 {today}\n"
+        f"📦 {os.path.basename(zipfile)}\n"
+        f"🔗 {release_url}"
+    }
+)
+
+releases = requests.get(
+    f"https://api.github.com/repos/{REPO}/releases",
+    headers=headers
+).json()
+
+if len(releases) > 30:
+
+    for r in releases[30:]:
+
+        requests.delete(
+            f"https://api.github.com/repos/{REPO}/releases/{r['id']}",
+            headers=headers
         )
 
-        print("Uploading to Discord...")
+        requests.delete(
+            f"https://api.github.com/repos/{REPO}/git/refs/tags/{r['tag_name']}",
+            headers=headers
+        )
 
-        with open(archive, "rb") as f:
-            r = requests.post(
-                WEBHOOK,
-                data={
-                    "content": f"📦 Palworld backup ({date})"
-                },
-                files={
-                    "file": f
-                },
-                timeout=300,
-            )
-
-        r.raise_for_status()
-
-        print("Backup completed successfully.")
-
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-        if os.path.exists(f"Palworld_Backup_{datetime.now().strftime('%Y-%m-%d')}.zip"):
-            os.remove(f"Palworld_Backup_{datetime.now().strftime('%Y-%m-%d')}.zip")
-
-
-if __name__ == "__main__":
-    main()
+shutil.rmtree(tmp)
+os.remove(zipfile)
