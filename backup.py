@@ -4,10 +4,12 @@ import time
 import shutil
 import tempfile
 import posixpath
-from datetime import datetime
+from datetime import datetime, timezone
 
 import paramiko
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ------------------------------------------------------------------
 # Environment Variables
@@ -26,6 +28,11 @@ headers = {
     "Authorization": f"Bearer {TOKEN}",
     "Accept": "application/vnd.github+json"
 }
+
+# Configure robust HTTP session with retries for GitHub API
+session = requests.Session()
+retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+session.mount("https://", HTTPAdapter(max_retries=retries))
 
 # Track skipped files during SFTP traversal
 skipped_items = []
@@ -71,7 +78,6 @@ def download(sftp, remote, local):
         return
 
     for f in items:
-        # Use posixpath for SFTP paths
         rp = posixpath.join(remote, f.filename)
         lp = os.path.join(local, f.filename)
 
@@ -96,15 +102,14 @@ try:
     sftp.close()
     transport.close()
 except Exception as e:
-    # Send Discord notification if connection or traversal fails completely
-    requests.post(
+    session.post(
         WEBHOOK,
         json={"content": f"🚨 **Palworld Backup Failed!**\n`SFTP Error: {e}`"}
     )
     raise
 
-# Create zip archive
-today = datetime.utcnow().strftime("%Y-%m-%d")
+# Create zip archive using UTC timezone-aware object
+today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 zipname = f"Palworld_Backup_{today}"
 
 zipfile = shutil.make_archive(
@@ -120,7 +125,7 @@ zipfile = shutil.make_archive(
 tag = today
 
 # Try creating a new release
-release = requests.post(
+release = session.post(
     f"https://api.github.com/repos/{REPO}/releases",
     headers=headers,
     json={
@@ -132,7 +137,7 @@ release = requests.post(
 
 # If release for today already exists, fetch existing release details
 if release.status_code == 422:
-    release = requests.get(
+    release = session.get(
         f"https://api.github.com/repos/{REPO}/releases/tags/{tag}",
         headers=headers
     )
@@ -140,17 +145,23 @@ if release.status_code == 422:
 release_data = release.json()
 upload_url = release_data["upload_url"].split("{")[0]
 
-# Upload the ZIP artifact
+# Upload the ZIP artifact with explicit Content-Length header and file stream
+file_size = os.path.getsize(zipfile)
+
 with open(zipfile, "rb") as f:
-    requests.post(
+    upload_headers = {
+        "Authorization": f"Bearer {TOKEN}",
+        "Content-Type": "application/zip",
+        "Content-Length": str(file_size)
+    }
+    
+    upload_resp = session.post(
         upload_url,
-        headers={
-            "Authorization": f"Bearer {TOKEN}",
-            "Content-Type": "application/zip"
-        },
+        headers=upload_headers,
         params={"name": os.path.basename(zipfile)},
         data=f
     )
+    upload_resp.raise_for_status()
 
 release_url = release_data.get("html_url", f"https://github.com/{REPO}/releases")
 
@@ -162,12 +173,12 @@ status_msg = f"✅ **Daily Palworld Backup Complete**\n\n📅 {today}\n📦 {os.
 if skipped_items:
     status_msg += f"\n\n⚠️ **Note:** {len(skipped_items)} item(s) skipped after retries (likely locked by server)."
 
-requests.post(WEBHOOK, json={"content": status_msg})
+session.post(WEBHOOK, json={"content": status_msg})
 
 # ------------------------------------------------------------------
 # Retention Cleanup (Keep Last 30 Releases)
 # ------------------------------------------------------------------
-releases_resp = requests.get(
+releases_resp = session.get(
     f"https://api.github.com/repos/{REPO}/releases",
     headers=headers
 )
@@ -176,11 +187,11 @@ if releases_resp.status_code == 200:
     releases = releases_resp.json()
     if len(releases) > 30:
         for r in releases[30:]:
-            requests.delete(
+            session.delete(
                 f"https://api.github.com/repos/{REPO}/releases/{r['id']}",
                 headers=headers
             )
-            requests.delete(
+            session.delete(
                 f"https://api.github.com/repos/{REPO}/git/refs/tags/{r['tag_name']}",
                 headers=headers
             )
